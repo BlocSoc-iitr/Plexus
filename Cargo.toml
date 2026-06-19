@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/cli",
+    "crates/dep-graph",
+    "crates/parser",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/akronim26/Plexus"
