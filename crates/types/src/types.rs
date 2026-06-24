@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StateKey {
     /// An individual storage slot within a contract.
-    StorageSlot { address: Address, slot: B256 },
+    StorageSlot {
+        address: Address,
+        slot: B256,
+    },
     Balance(Address),
     Nonce(Address),
     Code(Address),
@@ -97,7 +100,7 @@ pub struct BlockContext {
     pub number: u64,
     pub hash: B256,
     pub parent_hash: B256,
-    
+
     pub coinbase: Address,
     pub chain_id: u64,
     pub timestamp: u64,
@@ -125,8 +128,14 @@ mod tests {
     #[test]
     fn identical_state_keys_deduplicate_in_hashset() {
         let mut set = HashSet::new();
-        set.insert(StateKey::StorageSlot { address: addr(1), slot: slot(1) });
-        set.insert(StateKey::StorageSlot { address: addr(1), slot: slot(1) });
+        set.insert(StateKey::StorageSlot {
+            address: addr(1),
+            slot: slot(1),
+        });
+        set.insert(StateKey::StorageSlot {
+            address: addr(1),
+            slot: slot(1),
+        });
         assert_eq!(set.len(), 1);
     }
 
@@ -136,8 +145,14 @@ mod tests {
         // must not be flagged as conflicting.
         let usdc = addr(0xA0);
         let mut set = HashSet::new();
-        set.insert(StateKey::StorageSlot { address: usdc, slot: slot(1) });
-        set.insert(StateKey::StorageSlot { address: usdc, slot: slot(2) });
+        set.insert(StateKey::StorageSlot {
+            address: usdc,
+            slot: slot(1),
+        });
+        set.insert(StateKey::StorageSlot {
+            address: usdc,
+            slot: slot(2),
+        });
         assert_eq!(set.len(), 2);
     }
 
@@ -146,7 +161,10 @@ mod tests {
         let a = addr(1);
         assert_ne!(
             StateKey::Balance(a),
-            StateKey::StorageSlot { address: a, slot: slot(0) }
+            StateKey::StorageSlot {
+                address: a,
+                slot: slot(0)
+            }
         );
     }
 
