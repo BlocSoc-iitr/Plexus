@@ -1,5 +1,5 @@
 [workspace]
-members = [
+members = ["crates/cache",
     "crates/cli",
     "crates/dep-graph",
     "crates/parser",
