@@ -7,14 +7,14 @@ pub enum CacheError {
     NotFound(PathBuf),
 
     #[error("Malformed cache file at {path}: {source}")]
-    Malformed { 
-        path: PathBuf, 
-        source: serde_json::Error 
+    Malformed {
+        path: PathBuf,
+        source: serde_json::Error,
     },
 
     #[error("IO error at {path}: {source}")]
-    Io { 
-        path: PathBuf, 
-        source: std::io::Error 
-    }
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
