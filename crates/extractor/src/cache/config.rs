@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //PathBuf owns its data on the heap so it's easy
 //to implement cross-platform paths by modifying them.
 use alloy_primitives::B256;
@@ -38,5 +39,42 @@ impl CacheConfig {
     pub fn tx_path(&self, chain_id: u64, block_number: u64, tx_hash: &B256) -> PathBuf {
         let filename = format!("tx_{}.json", hex::encode(tx_hash.as_slice()));
         self.block_dir(chain_id, block_number).join(filename)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::B256;
+
+    #[test]
+    fn block_header_path_structure() {
+        let config = CacheConfig::with_root(PathBuf::from("/tmp/plexus"));
+        let path = config.block_header_path(1, 100);
+        assert_eq!(path, PathBuf::from("/tmp/plexus/1/100/block_header.json"));
+    }
+
+    #[test]
+    fn tx_path_filename_format() {
+        let config = CacheConfig::with_root(PathBuf::from("/tmp/plexus"));
+        let hash = B256::from([0xabu8; 32]);
+        let path = config.tx_path(1, 100, &hash);
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        // no 0x prefix, lowercase, wrapped in tx_...json
+        assert!(filename.starts_with("tx_"));
+        assert!(filename.ends_with(".json"));
+        assert!(!filename.contains("0x"));
+        assert_eq!(filename, filename.to_lowercase());
+    }
+
+    #[test]
+    fn different_chains_and_blocks_are_isolated() {
+        let config = CacheConfig::with_root(PathBuf::from("/tmp/plexus"));
+        let a = config.block_dir(1, 100);
+        let b = config.block_dir(137, 100); // same block, different chain
+        let c = config.block_dir(1, 200); // same chain, different block
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
     }
 }

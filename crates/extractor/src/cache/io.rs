@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::cache::CacheError;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -94,4 +96,72 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, CacheError> {
     })?;
 
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use tempfile::tempdir;
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Dummy {
+        value: u32,
+        label: String,
+    }
+
+    #[test]
+    fn write_then_read_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.json");
+        let original = Dummy {
+            value: 42,
+            label: "plexus".into(),
+        };
+
+        write_json(&path, &original).unwrap();
+        let result: Dummy = read_json(&path).unwrap();
+
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn no_tmp_file_after_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.json");
+        let value = Dummy {
+            value: 1,
+            label: "atomic".into(),
+        };
+
+        write_json(&path, &value).unwrap();
+
+        // tmp file must not exist after successful rename
+        let tmp = path.with_file_name(format!(
+            "{}.tmp",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn read_missing_file_returns_not_found() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ghost.json");
+
+        let err = read_json::<Dummy>(&path).unwrap_err();
+
+        assert!(matches!(err, CacheError::NotFound(_)));
+    }
+
+    #[test]
+    fn read_malformed_json_returns_malformed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, b"this is not json").unwrap();
+
+        let err = read_json::<Dummy>(&path).unwrap_err();
+
+        assert!(matches!(err, CacheError::Malformed { .. }));
+    }
 }
