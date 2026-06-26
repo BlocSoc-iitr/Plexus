@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::fs;
 use std::path::Path;
 use std::io::Write;
+use serde::de::DeserializeOwned;
 
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), CacheError> {
     if let Some(parent) = path.parent() {
@@ -50,4 +51,26 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), CacheError
     })?;
 
     Ok(())
+}
+
+pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, CacheError>{
+    if !path.exists() {
+        return Err(CacheError::NotFound(path.to_path_buf()));
+    }
+
+    let file_content = fs::read_to_string(path).map_err(|e| {
+        CacheError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        }
+    })?;
+
+    let value: T = serde_json::from_str(&file_content).map_err(|e| {
+        CacheError::Malformed {
+            path: path.to_path_buf(),
+            source: e 
+        }
+    })?;
+
+    Ok(value)
 }
