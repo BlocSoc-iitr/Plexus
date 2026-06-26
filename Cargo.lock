@@ -1046,7 +1046,9 @@ dependencies = [
 name = "parser"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "dirs",
+ "hex",
  "serde_json",
  "thiserror",
 ]
