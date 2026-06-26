@@ -13,28 +13,14 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), CacheError
     }
 
     let serialized_bytes = serde_json::to_vec_pretty(value).map_err(|e| {
-        CacheError::Malformed {
+        CacheError::Io {
             path: path.to_path_buf(),
-            source: e, 
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
         }
     })?;
     
-    let mut tmp_path = path.to_path_buf();
+    let tmp_path = path.with_extension("json.tmp");
 
-    if let Some(file_name) = path.file_name(){
-        let mut new_name = file_name.to_os_string();
-        new_name.push(".tmp");
-        tmp_path.set_file_name(new_name);
-
-    }else {
-        return Err(CacheError::Io {
-            path: path.to_path_buf(),
-            source: std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Invalid file path structure",
-            ),
-        });
-    }
     {
         let mut file = fs::OpenOptions::new()
             .write(true)
