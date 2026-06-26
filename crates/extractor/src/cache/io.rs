@@ -28,8 +28,8 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), CacheError
             source: e,
         })?;
     }
-    //converts a generic value into a pretty-printed jason bytes vector
-    let serialized_bytes = serde_json::to_vec_pretty(value).map_err(|e| CacheError::Io {
+    //converts a generic value into json bytes vector
+    let serialized_bytes = serde_json::to_vec(value).map_err(|e| CacheError::Io {
         path: path.to_path_buf(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
     })?;
