@@ -6,4 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
+dirs.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
 
