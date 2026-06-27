@@ -2,9 +2,8 @@
 
 use std::time::Duration;
 
-use crate::rpc::config::JitterStrategy::Full;
-
-enum JitterStrategy {Full} //Jitter_Strategy enum - defauts to Full jitter for better spread
+#[derive(PartialEq, Debug)]
+pub enum JitterStrategy {Full} //Jitter_Strategy enum - defauts to Full jitter for better spread
 
 pub struct RetryConfig {
     pub max_attemps: u8,
@@ -44,12 +43,42 @@ impl ClientConfig {
     }
 
     //ClientConfig setup with a url supplied by the client
-    pub fn new_with_endpoint(url: &String) -> Self {
+    pub fn default_with_endpoint(url: &String) -> Self {
         let def = ClientConfig {
             url: url.clone(),
             max_concurrency: 20,
             retry_config: RetryConfig::default()
         };
         def
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn clientconfig_default_returns_correct_params() {
+        let client_config = ClientConfig::default();
+        
+        //If these basic params are correct, other params will also be 
+        //correct by default. 
+        assert_eq!(client_config.retry_config.max_attemps,3);
+        assert_eq!(client_config.max_concurrency, 20);
+        assert_eq!(client_config.retry_config.jitter, JitterStrategy::Full);
+    }
+
+    #[test]
+    fn clientconfig_url_with_default_returns_correct_params() {
+        let url = String::from("https://ethereum-rpc.publicnode.com");
+        let client_config = ClientConfig::default_with_endpoint(&url);
+
+        assert_eq!(client_config.url, url);
+
+        //If these basic params are correct, other params will also be 
+        //correct by default. 
+        assert_eq!(client_config.retry_config.max_attemps,3);
+        assert_eq!(client_config.max_concurrency, 20);
+        assert_eq!(client_config.retry_config.jitter, JitterStrategy::Full);
     }
 }
