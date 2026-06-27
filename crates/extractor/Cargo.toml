@@ -14,11 +14,6 @@ serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 alloy.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-rand.workspace = true
-tower.workspace = true
-reqwest.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 rand = "0.8"
