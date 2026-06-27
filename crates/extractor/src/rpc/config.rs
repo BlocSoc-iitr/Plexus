@@ -69,6 +69,7 @@ mod test {
         assert_eq!(client_config.retry_config.max_attempts,3);
         assert_eq!(client_config.max_concurrency, 20);
         assert_eq!(client_config.retry_config.jitter, JitterStrategy::Full);
+        assert_eq!(client_config.timeout, Duration::from_secs(5));
     }
 
     #[test]
@@ -83,5 +84,6 @@ mod test {
         assert_eq!(client_config.retry_config.max_attempts,3);
         assert_eq!(client_config.max_concurrency, 20);
         assert_eq!(client_config.retry_config.jitter, JitterStrategy::Full);
+        assert_eq!(client_config.timeout, Duration::from_secs(5));
     }
 }
