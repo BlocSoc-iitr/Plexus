@@ -13,7 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-alloy.workspace = true
+alloy = { workspace = true, features = ["json-rpc"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 rand = "0.8"
