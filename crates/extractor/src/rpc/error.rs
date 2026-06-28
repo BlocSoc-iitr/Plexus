@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 use std::time::Duration;
-use alloy::transports::TransportError;
 use thiserror::Error;
-use reqwest::header::HeaderMap;
+use alloy::transports::{RpcError as AlloyRpcError, TransportError, TransportErrorKind};
+use crate::rpc::transport::RateLimited;
 
 #[derive(Debug)]
 pub enum RetryFlag {Fail, Retry}
@@ -49,37 +49,34 @@ pub type Result<T> = std::result::Result<T, RpcError>;
 
 /// Maps an alloy transport error (+ captured 429 headers) into a typed
 /// RpcError and a retryable verdict.
-fn classify(
+pub fn classify(
     err: TransportError,
-    headers: Option<HeaderMap>,
     method: &str,
 ) -> (RpcError, RetryFlag) {
-    // 1. Server returned a JSON-RPC error reply -> fail fast.
+    // JSON-RPC error reply then fail fast
     if err.is_error_resp() {
         return (
             RpcError::RpcResponse { method: method.to_string(), source: err },
             RetryFlag::Fail,
         );
-    } else if let Some(h) = headers {
-        let retry_after = parse_retry_after(&h);
-        return (
-            RpcError::RateLimited {method: method.to_string(), retry_after: retry_after},
-            RetryFlag::Retry
-        )
-    } else {
-        return (
-            RpcError::Transport { method: method.to_string(), source: err },
-            RetryFlag::Retry
-        )
     }
+    // our custom 429 signal carries the floor
+    if let Some(rl) = as_rate_limited(&err) {
+        let retry_after = rl.retry_after;
+        return (
+            RpcError::RateLimited { method: method.to_string(), retry_after },
+            RetryFlag::Retry,
+        );
+    }
+    (
+        RpcError::Transport { method: method.to_string(), source: err },
+        RetryFlag::Retry,
+    )
 }
 
-//parses the header of the return type of the retry_after error to find the 
-//exact duration to wait before retrying 
-fn parse_retry_after(h: &HeaderMap) -> Option<Duration> {
-    h.get("retry-after")?
-        .to_str().ok()?
-        .trim()
-        .parse::<u64>().ok()        // <delay-seconds> form
-        .map(Duration::from_secs)
+fn as_rate_limited(err: &TransportError) -> Option<&RateLimited> {
+    match err {
+        AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => e.downcast_ref::<RateLimited>(),
+        _ => None,
+    }
 }
