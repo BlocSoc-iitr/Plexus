@@ -15,8 +15,7 @@ pub struct RetryConfig {
 pub struct ClientConfig {
     pub url: String,
     pub max_concurrency: u32,
-    pub retry_config: RetryConfig,
-    pub timeout: Duration,
+    pub retry_config: RetryConfig
 }
 
 impl RetryConfig {
@@ -38,8 +37,7 @@ impl ClientConfig {
         let def = ClientConfig {
             url: url.clone(),
             max_concurrency: 20,
-            retry_config: RetryConfig::default(),
-            timeout: Duration::from_secs(5)
+            retry_config: RetryConfig::default()
         };
         def
     }
@@ -61,6 +59,5 @@ mod test {
         assert_eq!(client_config.retry_config.max_attempts,3);
         assert_eq!(client_config.max_concurrency, 20);
         assert_eq!(client_config.retry_config.jitter, JitterStrategy::Full);
-        assert_eq!(client_config.timeout, Duration::from_secs(5));
     }
 }
