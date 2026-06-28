@@ -97,7 +97,7 @@ mod tests {
 
     // Ordered to mirror classify's own branch order: error-resp, then 429, then plain transport.
 
-    // 1. A JSON-RPC error reply is non-retryable and maps to RpcResponse.
+    // A JSON-RPC error reply is non-retryable and maps to RpcResponse.
     #[test]
     fn classify_error_response_fails_fast() {
         let payload = serde_json::from_str::<ErrorPayload>(
@@ -109,7 +109,7 @@ mod tests {
         assert!(matches!(err, RpcError::RpcResponse { .. }));
     }
 
-    // 2. A 429 carried as a custom RateLimited error is retryable and keeps retry_after.
+    // A 429 carried as a custom RateLimited error is retryable and keeps retry_after.
     #[test]
     fn classify_rate_limited_is_retryable_and_preserves_retry_after() {
         let raw = TransportErrorKind::custom(RateLimited {
@@ -129,7 +129,7 @@ mod tests {
         }
     }
 
-    // 2b. A 429 with no/unparseable Retry-After still classifies as RateLimited (retry_after None).
+    // A 429 with no/unparseable Retry-After still classifies as RateLimited (retry_after None).
     #[test]
     fn classify_rate_limited_without_retry_after() {
         let raw = TransportErrorKind::custom(RateLimited { retry_after: None });
@@ -141,7 +141,7 @@ mod tests {
         }
     }
 
-    // 3. Any other transport-layer failure is retryable and maps to Transport.
+    // Any other transport-layer failure is retryable and maps to Transport.
     #[test]
     fn classify_plain_transport_is_retryable() {
         let (err, flag) = classify(

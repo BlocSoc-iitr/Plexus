@@ -108,7 +108,7 @@ mod tests {
         }
     }
 
-    // happy path: a single 200 funnels through permit -> timeout -> retry -> one call.
+    // happy path: a single 200 funnels through permit, timeout, retry, then one call.
     #[tokio::test]
     async fn smoke_single_200_returns_ok() {
         let server = MockServer::start().await;
@@ -198,7 +198,7 @@ mod tests {
         assert!(matches!(out, Err(RpcError::RpcResponse { .. })));
     }
 
-    // 429 + Retry-After: 1 -> the wait is floored to >= 1s, then succeeds.
+    // 429 + Retry-After: 1 means the wait is floored to at least 1s, then succeeds.
     #[tokio::test]
     async fn rate_limited_retry_after_is_floored() {
         let server = MockServer::start().await;
