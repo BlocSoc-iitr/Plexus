@@ -33,18 +33,7 @@ impl RetryConfig {
 }
 
 impl ClientConfig {
-    //Default setting for a ClientConfig
-    pub fn default() -> Self {
-        let def = ClientConfig {
-            url: String::from("http://localhost:8545"),
-            max_concurrency: 20,
-            retry_config: RetryConfig::default(),
-            timeout: Duration::from_secs(5)
-        };
-        def
-    }
-
-    //ClientConfig setup with a url supplied by the client
+    //ClientConfig setup with a url supplied by the user
     pub fn default_with_endpoint(url: &String) -> Self {
         let def = ClientConfig {
             url: url.clone(),
@@ -59,18 +48,6 @@ impl ClientConfig {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn clientconfig_default_returns_correct_params() {
-        let client_config = ClientConfig::default();
-        
-        //If these basic params are correct, other params will also be 
-        //correct by default. 
-        assert_eq!(client_config.retry_config.max_attempts,3);
-        assert_eq!(client_config.max_concurrency, 20);
-        assert_eq!(client_config.retry_config.jitter, JitterStrategy::Full);
-        assert_eq!(client_config.timeout, Duration::from_secs(5));
-    }
 
     #[test]
     fn clientconfig_url_with_default_returns_correct_params() {
