@@ -1,21 +1,38 @@
-#![allow(dead_code)]
-use std::cmp::min;
-use std::time::Duration;
 use alloy::transports::TransportError;
+use std::cmp::min;
 use std::future::Future;
+use std::time::Duration;
 
-use rand::Rng;                 // jitter: thread_rng().gen_range(..)
-use tokio::time::{sleep, timeout};        // backoff waits
-use tracing::{error, warn};    // WARN per retry, ERROR on exhaustion
+use rand::Rng; // jitter: thread_rng().gen_range(..)
+use tokio::time::{sleep, timeout}; // backoff waits
+use tracing::{error, warn}; // WARN per retry, ERROR on exhaustion
 
 use crate::rpc::config::RetryConfig;
-use crate::rpc::error::{Result, RpcError, classify, RetryFlag};
+use crate::rpc::error::{classify, Result, RetryFlag};
+use crate::rpc::RpcError;
 
-//calculates the delay in the successive attempts. 
-pub fn delay_calc (attempt: u32, retry_config: &RetryConfig) -> Duration {
-    let mut delay = retry_config.base_delay * 2u32.saturating_pow(attempt-1);
+//calculates the delay in the successive attempts.
+fn delay_calc(attempt: u32, retry_config: &RetryConfig) -> Duration {
+    let mut delay = retry_config.base_delay * 2u32.saturating_pow(attempt - 1);
     delay = min(delay, retry_config.max_delay);
     delay
+}
+
+// Full jitter over [0, computed]. Split out so the bound is unit-testable.
+fn apply_jitter(computed: Duration, rng: &mut impl Rng) -> Duration {
+    let high = computed.as_millis() as u64;
+    Duration::from_millis(rng.gen_range(0..=high))
+}
+
+// Total wait: full jitter over the computed backoff, with Retry-After added
+// on top as a floor (None means just the jittered delay).
+fn backoff_wait(
+    attempt: u32,
+    cfg: &RetryConfig,
+    retry_after: Option<Duration>,
+    rng: &mut impl Rng,
+) -> Duration {
+    apply_jitter(delay_calc(attempt, cfg), rng) + retry_after.unwrap_or(Duration::ZERO)
 }
 
 pub async fn run_with_retry<R, F, Fut>(
@@ -26,26 +43,26 @@ pub async fn run_with_retry<R, F, Fut>(
     mut operation: F,
 ) -> Result<R>
 where
-    F: FnMut() -> Fut,                                  // re-callable: one call = one attempt
+    F: FnMut() -> Fut, // re-callable: one call = one attempt
     Fut: Future<Output = std::result::Result<R, TransportError>>,
 {
-    let mut attempt = attempt.clone();
+    let mut attempt = *attempt;
     loop {
         attempt += 1;
         let outcome = timeout(attempt_timeout, operation()).await;
         match outcome {
-            Ok(Ok(r))  => return Ok(r),
+            Ok(Ok(r)) => return Ok(r),
             Err(_elapsed) => {
-                let rpc_error = RpcError::Timeout { 
+                let rpc_error = RpcError::Timeout {
                     elapsed: Some(attempt_timeout),
                     method: method.to_string(),
                 };
                 //before retrying, check if max attempts have exceeded.
                 if attempt >= retry_config.max_attempts as u32 {
-                    let rpc_error = RpcError::RetriesExhausted { 
-                        method: method.to_string(), 
+                    let rpc_error = RpcError::RetriesExhausted {
+                        method: method.to_string(),
                         attempt_count: attempt,
-                        source: Box::new(rpc_error)
+                        source: Box::new(rpc_error),
                     };
                     error!(
                         method,
@@ -53,14 +70,11 @@ where
                         err = %rpc_error,
                         "rpc attempt permanently failed, maximum attempts reached."
                     );
-                    return Err(rpc_error)
+                    return Err(rpc_error);
                 }
                 // retryable, skips classify
-                //computes the jitter
-                let computed = delay_calc(attempt, retry_config); // retry_config is already &RetryConfig
-                let high = computed.as_millis() as u64;
-                let jittered = Duration::from_millis(rand::thread_rng().gen_range(0..=high));
-                //warns the user before sleeping 
+                let jittered = backoff_wait(attempt, retry_config, None, &mut rand::thread_rng());
+                //warns the user before sleeping
                 warn!(
                     method,
                     attempt,
@@ -71,15 +85,12 @@ where
                 );
                 //sleeps for the jittered duration - in the timeout error, the retry-after header is 0
                 sleep(jittered).await;
-                continue; //retries 
-            },
+                continue; //retries
+            }
             Ok(Err(e)) => {
                 let (rpc_error, flag) = classify(e, method);
-                //computes the jitter 
-                let computed = delay_calc(attempt, retry_config); // retry_config is already &RetryConfig
-                let high = computed.as_millis() as u64;
-                let jittered = Duration::from_millis(rand::thread_rng().gen_range(0..=high));
-                if flag == RetryFlag::Fail {// fail fast, no retry
+                if flag == RetryFlag::Fail {
+                    // fail fast, no retry
                     error!(
                         method,
                         attempt,
@@ -87,13 +98,13 @@ where
                         err = %rpc_error,
                         "rpc attempt failed permanently, received error as response"
                     );
-                    return Err(rpc_error)
-                } 
+                    return Err(rpc_error);
+                }
                 if attempt >= retry_config.max_attempts as u32 {
-                    let rpc_error = RpcError::RetriesExhausted { 
-                        method: method.to_string(), 
+                    let rpc_error = RpcError::RetriesExhausted {
+                        method: method.to_string(),
                         attempt_count: attempt,
-                        source: Box::new(rpc_error)
+                        source: Box::new(rpc_error),
                     };
                     error!(
                         method,
@@ -101,12 +112,17 @@ where
                         err = %rpc_error,
                         "rpc attempt permanently failed, maximum attempts reached."
                     );
-                    return Err(rpc_error)
+                    return Err(rpc_error);
                 }
-                else if let RpcError::RateLimited { method, retry_after } = &rpc_error {
-                    //computes total duration of waiting 
-                    let t_duration = jittered+retry_after.unwrap_or(Duration::from_millis(0));
-                    //warns the user 
+
+                if let RpcError::RateLimited {
+                    method,
+                    retry_after,
+                } = &rpc_error
+                {
+                    let t_duration =
+                        backoff_wait(attempt, retry_config, *retry_after, &mut rand::thread_rng());
+                    //warns the user
                     warn!(
                         method,
                         attempt,
@@ -118,9 +134,11 @@ where
                     //sleeps, then continues
                     sleep(t_duration).await;
                     continue;
-                } 
+                }
                 // TransportError calls classify
                 {
+                    let jittered =
+                        backoff_wait(attempt, retry_config, None, &mut rand::thread_rng());
                     warn!(
                         method,
                         attempt,
@@ -140,7 +158,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::config::JitterStrategy;
     use crate::rpc::transport::RateLimited;
     use alloy::rpc::json_rpc::ErrorPayload;
     use alloy::transports::TransportErrorKind;
@@ -153,7 +170,6 @@ mod tests {
             max_attempts: 3,
             base_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(4),
-            jitter: JitterStrategy::Full,
         }
     }
 
@@ -172,11 +188,11 @@ mod tests {
     // --- delay_calc: geometric growth, then clamps at max_delay ---
     #[test]
     fn delay_calc_grows_then_clamps() {
-        let cfg = RetryConfig::default(); // base 100ms, max 2s
+        let cfg = RetryConfig::new(); // base 100ms, max 2s
         assert_eq!(delay_calc(1, &cfg), Duration::from_millis(100)); // 100 * 2^0
         assert_eq!(delay_calc(2, &cfg), Duration::from_millis(200)); // 100 * 2^1
         assert_eq!(delay_calc(3, &cfg), Duration::from_millis(400)); // 100 * 2^2
-        assert_eq!(delay_calc(6, &cfg), Duration::from_secs(2)); // 3200ms -> clamped
+        assert_eq!(delay_calc(6, &cfg), Duration::from_secs(2)); // clamped
     }
 
     // --- run_with_retry, ordered from simplest path to most involved ---
@@ -267,6 +283,26 @@ mod tests {
         assert!(matches!(out, Err(RpcError::RetriesExhausted { .. })));
     }
 
+    //A timed-out attempt is retryable: it times out once, then the next call succeeds.
+    #[tokio::test]
+    async fn times_out_then_succeeds() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let op = move || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    tokio::time::sleep(Duration::from_secs(30)).await; // blow the timeout once
+                }
+                Ok::<u64, TransportError>(7)
+            }
+        };
+        let out = run_with_retry(&0u32, "m", &fast_cfg(), Duration::from_millis(10), op).await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     //A 429 is retryable: rate-limited once, then succeeds.
     #[tokio::test]
     async fn retries_rate_limited_then_succeeds() {
@@ -302,12 +338,39 @@ mod tests {
         };
         let out = run_with_retry(&0u32, "m", &fast_cfg(), Duration::from_secs(5), op).await;
         match out {
-            Err(RpcError::RetriesExhausted { attempt_count, source, .. }) => {
+            Err(RpcError::RetriesExhausted {
+                attempt_count,
+                source,
+                ..
+            }) => {
                 assert_eq!(attempt_count, 3);
                 assert!(matches!(*source, RpcError::RateLimited { .. }));
             }
             other => panic!("expected RetriesExhausted, got {other:?}"),
         }
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    // Full jitter never escapes [0, computed]; Retry-After only shifts the floor up.
+    #[test]
+    fn jitter_stays_within_bounds() {
+        let cfg = RetryConfig::new();
+        let mut rng = rand::thread_rng();
+
+        // Across the growth range and the cap, jitter stays under the computed delay.
+        for attempt in 1..=6 {
+            let computed = delay_calc(attempt, &cfg);
+            for _ in 0..1_000 {
+                assert!(apply_jitter(computed, &mut rng) <= computed);
+            }
+        }
+
+        // With a Retry-After floor, total wait lands in [retry_after, retry_after + computed].
+        let ra = Duration::from_secs(5);
+        let computed = delay_calc(2, &cfg);
+        for _ in 0..1_000 {
+            let w = backoff_wait(2, &cfg, Some(ra), &mut rng);
+            assert!(w >= ra && w <= ra + computed);
+        }
     }
 }
