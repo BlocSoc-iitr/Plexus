@@ -1,13 +1,13 @@
 use alloy::transports::TransportError;
-use tokio::sync::Semaphore;
 use std::cmp::min;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
-use rand::Rng; // jitter: thread_rng().gen_range(..)
-use tokio::time::{sleep, timeout}; // backoff waits
-use tracing::{error, warn}; // warn per retry, error on exhaustion
+use rand::Rng;
+use tokio::time::{sleep, timeout};
+use tracing::{error, warn};
 
 use crate::rpc::config::RetryConfig;
 use crate::rpc::error::{classify, Result, RetryFlag};
@@ -75,9 +75,8 @@ where
                     );
                     return Err(rpc_error);
                 }
-                // retryable, skips classify
+                // a timeout is always worth another go, no need to classify it
                 let jittered = backoff_wait(attempt, retry_config, None, &mut rand::thread_rng());
-                // warn before backing off
                 warn!(
                     method,
                     attempt,
@@ -118,22 +117,55 @@ where
                     );
                     return Err(rpc_error);
                 }
-
+                // rate-limited or service-unavailable, both hand us a retry-after to wait out
                 if let RpcError::RateLimited {
+                    method,
+                    retry_after,
+                }
+                | RpcError::ServiceUnavailable {
                     method,
                     retry_after,
                 } = &rpc_error
                 {
                     let t_duration =
                         backoff_wait(attempt, retry_config, *retry_after, &mut rand::thread_rng());
-                    // warn before backing off
                     warn!(
                         method,
                         attempt,
                         max_attempts = retry_config.max_attempts,
                         total_duration = ?t_duration,
                         err = %rpc_error,
-                        "rpc attempt failed, call got rate-limited, backing off and retrying"
+                        "rpc attempt failed, backing off and retrying"
+                    );
+                    // release the permit before sleeping so the slot is free during backoff
+                    drop(permit);
+                    sleep(t_duration).await;
+                    continue;
+                }
+                // the retryable server-side statuses, no retry-after to honour so we
+                // just back off on our own clock
+                if let RpcError::BadGateway {
+                    method,
+                    source: err,
+                }
+                | RpcError::GatewayTimeout {
+                    method,
+                    source: err,
+                }
+                | RpcError::InternalServerError {
+                    method,
+                    source: err,
+                } = &rpc_error
+                {
+                    let t_duration =
+                        backoff_wait(attempt, retry_config, None, &mut rand::thread_rng());
+                    warn!(
+                        method,
+                        attempt,
+                        max_attempts = retry_config.max_attempts,
+                        total_duration = ?t_duration,
+                        err = %err,
+                        "rpc attempt failed, backing off and retrying"
                     );
                     // release the permit before sleeping so the slot is free during backoff
                     drop(permit);
@@ -164,7 +196,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::transport::RateLimited;
+    use crate::rpc::transport::{RateLimited, ServiceUnavailable};
     use alloy::rpc::json_rpc::ErrorPayload;
     use alloy::transports::TransportErrorKind;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -189,6 +221,10 @@ mod tests {
 
     fn rate_limited(retry_after: Option<Duration>) -> TransportError {
         TransportErrorKind::custom(RateLimited { retry_after })
+    }
+
+    fn service_unavailable(retry_after: Option<Duration>) -> TransportError {
+        TransportErrorKind::custom(ServiceUnavailable { retry_after })
     }
 
     // a roomy semaphore so these single-flight retry tests never block on permits;
@@ -284,7 +320,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
-    // a call that never finishes within the per-attempt timeout exhausts via Timeout
+    // a call that never finishes within the per-attempt timeout exhausts as a timeout
     #[tokio::test]
     async fn times_out_then_exhausts() {
         let op = || async {
@@ -336,7 +372,47 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
-    // a persistent 429 exhausts, and the boxed source is the RateLimited error
+    // a 503 is retryable too: unavailable once, then succeeds. covers the
+    // service-unavailable branch, separate from the 429 path above
+    #[tokio::test]
+    async fn retries_service_unavailable_then_succeeds() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let op = move || {
+            let c = c.clone();
+            async move {
+                let n = c.fetch_add(1, Ordering::SeqCst);
+                if n < 1 {
+                    Err::<u64, TransportError>(service_unavailable(Some(Duration::from_millis(2))))
+                } else {
+                    Ok(7)
+                }
+            }
+        };
+        let out = run_with_retry(&sem(), "m", &fast_cfg(), Duration::from_secs(5), op).await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    // a retry-after past the two-minute cap is non-retryable: classify bails, so
+    // run_with_retry returns after one attempt instead of sleeping for minutes
+    #[tokio::test]
+    async fn retry_after_over_cap_fails_fast_without_retry() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let c = calls.clone();
+        let op = move || {
+            let c = c.clone();
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Err::<u64, TransportError>(service_unavailable(Some(Duration::from_secs(3 * 60))))
+            }
+        };
+        let out = run_with_retry(&sem(), "m", &fast_cfg(), Duration::from_secs(5), op).await;
+        assert!(matches!(out, Err(RpcError::RetryDelayTooLong { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // a persistent 429 exhausts, and the boxed source is the rate-limited error
     #[tokio::test]
     async fn rate_limited_exhausts_with_rate_limited_source() {
         let calls = Arc::new(AtomicU32::new(0));
@@ -363,10 +439,10 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
-    // a backing-off attempt must release its permit so other calls run during the
-    // sleep. with one permit, A grabs it first and backs off ~200ms on a 429; B
-    // then has to slip through and finish before A wakes. holding the permit through
-    // the sleep would force B to wait for A, inverting the order
+    // a backing-off attempt has to drop its permit so others can run during the
+    // sleep. with a single permit, the first call grabs it and backs off ~200ms on
+    // a 429; the second has to slip through and finish before the first wakes.
+    // holding the permit across the sleep would flip that ordering
     #[tokio::test]
     async fn permit_released_during_backoff() {
         let sem = Arc::new(Semaphore::new(1));
@@ -381,8 +457,10 @@ mod tests {
                     let (calls, signal) = (calls.clone(), signal.clone());
                     async move {
                         if calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                            signal.notify_one(); // A now holds the only permit
-                            Err::<u64, TransportError>(rate_limited(Some(Duration::from_millis(200))))
+                            signal.notify_one(); // this call now holds the only permit
+                            Err::<u64, TransportError>(rate_limited(Some(Duration::from_millis(
+                                200,
+                            ))))
                         } else {
                             Ok(7)
                         }
@@ -395,7 +473,7 @@ mod tests {
             })
         };
 
-        // start B only once A provably holds the permit and is about to back off
+        // start the second call only once the first provably holds the permit and is backing off
         a_has_permit.notified().await;
         let b = {
             let (sem, order) = (sem.clone(), order.clone());

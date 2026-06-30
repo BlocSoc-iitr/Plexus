@@ -1,18 +1,16 @@
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
 use alloy::rpc::client::{ClientBuilder, RpcClient as AlloyRpcClient};
-use alloy::rpc::json_rpc::{RpcRecv, RpcSend}; // param/return bounds for request<P, R>
+use alloy::rpc::json_rpc::{RpcRecv, RpcSend};
 use reqwest::Url;
 
 use crate::rpc::config::ClientConfig;
 use crate::rpc::error::Result;
-use crate::rpc::RpcError;
 use crate::rpc::retry::run_with_retry;
 use crate::rpc::transport::RetryAfterTransport;
+use crate::rpc::RpcError;
 
 #[derive(Debug)]
 pub struct RpcClient {
@@ -26,8 +24,8 @@ impl RpcClient {
         Self::with_config(ClientConfig::new(&url_str))
     }
 
-    // build a ClientConfig, then hand it in. returns err on a bad url so the
-    // caller decides whether to exit
+    // builds the config then hands it over. returns an error on a bad url so the
+    // caller gets to decide whether to bail
     fn with_config(client_config: ClientConfig) -> Result<Self> {
         let url = Url::parse(&client_config.url).map_err(|e| RpcError::InvalidUrl {
             url: client_config.url.clone(),
@@ -43,9 +41,8 @@ impl RpcClient {
         })
     }
 
-
-    // skip_all so we don't debug-print self (the whole client and config) or
-    // params (P isn't Debug-bound); record only the method as a span field
+    // skip_all keeps the whole client, config, and params out of the span, the
+    // params aren't debug-printable anyway. just record the method name
     #[tracing::instrument(skip_all, fields(method = %method))]
     pub async fn request<P, R>(&self, method: &str, params: P) -> Result<R>
     where
@@ -178,7 +175,7 @@ mod tests {
         }
     }
 
-    // a json-rpc error reply fails fast: returned as RpcResponse with no retries
+    // a json-rpc error reply fails fast, with no retries
     #[tokio::test]
     async fn json_rpc_error_fails_fast() {
         let server = MockServer::start().await;

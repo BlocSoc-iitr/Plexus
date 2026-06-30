@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -48,7 +46,6 @@ impl ClientConfig {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -68,14 +65,16 @@ mod test {
 
     #[test]
     fn with_concurrency_overrides_default() {
-        let client_config = ClientConfig::new("https://ethereum-rpc.publicnode.com").with_concurrency(50);
+        let client_config =
+            ClientConfig::new("https://ethereum-rpc.publicnode.com").with_concurrency(50);
 
         assert_eq!(client_config.max_concurrency, 50);
     }
 
     #[test]
     fn with_timeout_overrides_default() {
-        let client_config = ClientConfig::new("https://ethereum-rpc.publicnode.com") .with_timeout(Duration::from_secs(5));
+        let client_config = ClientConfig::new("https://ethereum-rpc.publicnode.com")
+            .with_timeout(Duration::from_secs(5));
 
         assert_eq!(client_config.timeout, Duration::from_secs(5));
     }

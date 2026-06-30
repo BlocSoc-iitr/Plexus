@@ -1,17 +1,22 @@
-#![allow(dead_code)]
 use std::fmt;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
 use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
-use reqwest::{header::HeaderMap, Client, StatusCode, Url};
+use reqwest::{header::HeaderMap, Client, Url};
 use tower::Service;
 
-/// carried inside the transport error on a 429 so the retry-after value rides
-/// back with this request, with no shared side channel and no aliasing
+// rides inside the transport error on a 429 so the retry-after value comes back
+// with the request instead of through a shared side channel
 #[derive(Debug)]
 pub struct RateLimited {
+    pub retry_after: Option<Duration>,
+}
+
+// same idea for a 503, carries its retry-after back to the retry layer
+#[derive(Debug)]
+pub struct ServiceUnavailable {
     pub retry_after: Option<Duration>,
 }
 
@@ -22,7 +27,14 @@ impl fmt::Display for RateLimited {
 }
 impl std::error::Error for RateLimited {}
 
-/// parse the delay-seconds form of retry-after
+impl fmt::Display for ServiceUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "rate limited (HTTP 429)")
+    }
+}
+impl std::error::Error for ServiceUnavailable {}
+
+// only the delay-seconds form of retry-after, the http-date form is ignored
 fn parse_retry_after(h: &HeaderMap) -> Option<Duration> {
     h.get("retry-after")?
         .to_str()
@@ -67,10 +79,30 @@ impl Service<RequestPacket> for RetryAfterTransport {
                 .send()
                 .await
                 .map_err(TransportErrorKind::custom)?;
-            // on a 429, snapshot retry-after and carry it back in the error
-            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            // on a 429, grab retry-after and send it back in the error
+            if resp.status() == 429 {
                 let retry_after = parse_retry_after(resp.headers());
                 return Err(TransportErrorKind::custom(RateLimited { retry_after }));
+            }
+            // same for a 503
+            if resp.status() == 503 {
+                let retry_after = parse_retry_after(resp.headers());
+                return Err(TransportErrorKind::custom(ServiceUnavailable {
+                    retry_after,
+                }));
+            }
+            // anything else non-2xx (5xx, 401, 404, and so on) is a transport failure,
+            // not a json-rpc reply. turn it into a typed http error so an error page
+            // never reaches the json parser and gets misreported as a decode failure
+            let status = resp.status();
+            if !status.is_success() {
+                // there's no retry-after to carry here, classify in error.rs sorts
+                // these out by their status code
+                let body = resp.bytes().await.map_err(TransportErrorKind::custom)?;
+                return Err(TransportErrorKind::http_error(
+                    status.as_u16(),
+                    String::from_utf8_lossy(&body).into_owned(),
+                ));
             }
             let body = resp.bytes().await.map_err(TransportErrorKind::custom)?;
             serde_json::from_slice(&body)
@@ -89,7 +121,7 @@ mod tests {
     use wiremock::matchers::method as http_method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    // parse_retry_after: only the delay-seconds form is supported
+    // only the delay-seconds form is supported
     fn header_map(value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert("retry-after", HeaderValue::from_str(value).unwrap());
@@ -131,14 +163,14 @@ mod tests {
         );
     }
 
-    // Service::call against a mock endpoint
+    // call against a mock endpoint
 
     fn packet() -> RequestPacket {
         let req = Request::new("eth_blockNumber", Id::Number(0), ());
         RequestPacket::Single(req.serialize().unwrap())
     }
 
-    // recover the RateLimited that rides inside a 429's transport error
+    // pull the rate-limited marker back out of a 429's transport error
     fn as_rate_limited(err: &TransportError) -> Option<&RateLimited> {
         match err {
             AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => {
@@ -178,7 +210,7 @@ mod tests {
         assert_eq!(rl.retry_after, Some(Duration::from_secs(7)));
     }
 
-    // a 429 without the header still signals RateLimited, floor unknown
+    // a 429 with no header still signals rate-limited, just no floor
     #[tokio::test]
     async fn call_429_without_header_is_none() {
         let server = MockServer::start().await;
@@ -212,5 +244,50 @@ mod tests {
     async fn call_connection_refused_is_error() {
         let mut t = RetryAfterTransport::new("http://127.0.0.1:1".parse().unwrap());
         assert!(t.call(packet()).await.is_err());
+    }
+
+    // a non-success status comes back as a typed http error, not a decode failure
+    #[tokio::test]
+    async fn call_500_is_http_error_not_deser() {
+        let server = MockServer::start().await;
+        Mock::given(http_method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream boom"))
+            .mount(&server)
+            .await;
+
+        let mut t = RetryAfterTransport::new(server.uri().parse().unwrap());
+        let err = t.call(packet()).await.expect_err("expected http error");
+        match err {
+            AlloyRpcError::Transport(ref kind) => {
+                assert_eq!(kind.as_http_error().map(|h| h.status), Some(500));
+            }
+            other => panic!("expected transport http error, got {other:?}"),
+        }
+        assert!(as_rate_limited(&err).is_none());
+    }
+
+    // pull the service-unavailable marker back out of a 503's transport error
+    fn as_service_unavailable(err: &TransportError) -> Option<&ServiceUnavailable> {
+        match err {
+            AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => {
+                e.downcast_ref::<ServiceUnavailable>()
+            }
+            _ => None,
+        }
+    }
+
+    // a 503 carries its retry-after back in the error, not as a decode failure
+    #[tokio::test]
+    async fn call_503_carries_retry_after() {
+        let server = MockServer::start().await;
+        Mock::given(http_method("POST"))
+            .respond_with(ResponseTemplate::new(503).insert_header("retry-after", "9"))
+            .mount(&server)
+            .await;
+
+        let mut t = RetryAfterTransport::new(server.uri().parse().unwrap());
+        let err = t.call(packet()).await.expect_err("expected 503 error");
+        let su = as_service_unavailable(&err).expect("expected ServiceUnavailable");
+        assert_eq!(su.retry_after, Some(Duration::from_secs(9)));
     }
 }
