@@ -10,55 +10,55 @@ use reqwest::Url;
 
 use crate::rpc::config::ClientConfig;
 use crate::rpc::error::Result;
+use crate::rpc::RpcError;
 use crate::rpc::retry::run_with_retry;
 use crate::rpc::transport::RetryAfterTransport;
 
 #[derive(Debug)]
 pub struct RpcClient {
-    pub inner: AlloyRpcClient,
-    pub semaphore: Arc<Semaphore>,
-    pub client_config: ClientConfig,
+    inner: AlloyRpcClient,
+    semaphore: Arc<Semaphore>,
+    client_config: ClientConfig,
 }
 
 impl RpcClient {
-    pub fn new(url_str: String) -> Self {
-        let client_config = ClientConfig::new_with_endpoint(&url_str);
-        let url = match Url::parse(&client_config.url) {
-            Ok(url) => url,
-            Err(e) => {
-                panic!("Invalid url: {url_str} \n Error obtained: {e}")
-            }
-        };
+    pub fn new(url_str: String) -> Result<Self> {
+        Self::with_config(ClientConfig::new(&url_str))
+    }
+
+    // build a ClientConfig, then hand it in. returns err on a bad url so the
+    // caller decides whether to exit
+    fn with_config(client_config: ClientConfig) -> Result<Self> {
+        let url = Url::parse(&client_config.url).map_err(|e| RpcError::InvalidUrl {
+            url: client_config.url.clone(),
+            method: e.to_string(),
+        })?;
         let transport = RetryAfterTransport::new(url);
         let inner = ClientBuilder::default().transport(transport, false);
-        let concurrency = client_config.max_concurrency;
-        let semaphore = Arc::new(Semaphore::new(concurrency as usize));
-        RpcClient {
+        let semaphore = Arc::new(Semaphore::new(client_config.max_concurrency as usize));
+        Ok(RpcClient {
             inner,
             semaphore,
             client_config,
-        }
+        })
     }
 
-    // skip_all so we don't try to Debug-print `self` (the whole client/config) or
-    // `params` (P isn't Debug-bound); record only the method as a span field.
+
+    // skip_all so we don't debug-print self (the whole client and config) or
+    // params (P isn't Debug-bound); record only the method as a span field
     #[tracing::instrument(skip_all, fields(method = %method))]
     pub async fn request<P, R>(&self, method: &str, params: P) -> Result<R>
     where
         P: RpcSend + Clone,
         R: RpcRecv,
     {
-        // Permit is held for the whole call — across every retry and backoff sleep —
-        // not re-acquired per attempt. Trade-off: a retrying/rate-limited call
-        // keeps occupying one of `max_concurrency` slots while it sleeps, so a burst
-        // of 429s can throttle throughput, in exchange a single logical request never
-        // exceeds one permit and cannot be starved mid-retry by newer calls.
-        let _permit = self.semaphore.clone().acquire_owned().await.unwrap();
-
+        // the permit lives inside run_with_retry, which releases it before each
+        // backoff sleep and reacquires it for the next attempt, so a backing-off
+        // call never holds a concurrency slot while it waits
         let op = || self.inner.request(method.to_string(), params.clone());
 
         run_with_retry(
-            &0u32,
+            &self.semaphore,
             method,
             &self.client_config.retry_config,
             self.client_config.timeout,
@@ -77,7 +77,7 @@ mod tests {
     use wiremock::matchers::method as http_method;
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
-    // Echo the JSON-RPC id back so alloy correlates the response (ids climb on retry).
+    // echo the json-rpc id back so alloy correlates the response (ids climb on retry)
     fn ok_body(req: &Request, result: &str) -> serde_json::Value {
         let id = serde_json::from_slice::<serde_json::Value>(&req.body)
             .ok()
@@ -86,7 +86,7 @@ mod tests {
         serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
     }
 
-    // First `fail_until` calls return `status` (+ optional Retry-After), then a 200 result.
+    // first fail_until calls return status with an optional retry-after, then a 200 result
     struct SeqResponder {
         calls: Arc<AtomicU32>,
         fail_until: u32,
@@ -108,7 +108,7 @@ mod tests {
         }
     }
 
-    // happy path: a single 200 funnels through permit, timeout, retry, then one call.
+    // happy path: a single 200 funnels through permit, timeout, and retry as one call
     #[tokio::test]
     async fn smoke_single_200_returns_ok() {
         let server = MockServer::start().await;
@@ -124,11 +124,11 @@ mod tests {
             .await;
 
         let client = RpcClient::new(server.uri());
-        let out: Result<String> = client.request("eth_blockNumber", ()).await;
+        let out: Result<String> = client.unwrap().request("eth_blockNumber", ()).await;
         assert_eq!(out.unwrap(), "0x10");
     }
 
-    // transient errors retry, then succeed (exactly 3 calls: 2 fail + 1 ok).
+    // transient errors retry, then succeed (3 calls: 2 fail, 1 ok)
     #[tokio::test]
     async fn transient_then_success() {
         let server = MockServer::start().await;
@@ -144,12 +144,12 @@ mod tests {
             .await;
 
         let client = RpcClient::new(server.uri());
-        let out: Result<String> = client.request("eth_blockNumber", ()).await;
+        let out: Result<String> = client.unwrap().request("eth_blockNumber", ()).await;
         assert_eq!(out.unwrap(), "0x10");
         assert_eq!(calls.load(SeqCst), 3);
     }
 
-    // persistent errors exhaust after max_attempts (3), method name preserved.
+    // persistent errors exhaust after max_attempts (3), method name preserved
     #[tokio::test]
     async fn exhausts_with_method() {
         let server = MockServer::start().await;
@@ -164,7 +164,7 @@ mod tests {
             .await;
 
         let client = RpcClient::new(server.uri());
-        let out: Result<String> = client.request("eth_getLogs", ()).await;
+        let out: Result<String> = client.unwrap().request("eth_getLogs", ()).await;
         match out {
             Err(RpcError::RetriesExhausted {
                 method,
@@ -178,7 +178,7 @@ mod tests {
         }
     }
 
-    // a JSON-RPC error reply fails fast: returned as RpcResponse with no retries.
+    // a json-rpc error reply fails fast: returned as RpcResponse with no retries
     #[tokio::test]
     async fn json_rpc_error_fails_fast() {
         let server = MockServer::start().await;
@@ -189,16 +189,16 @@ mod tests {
         });
         Mock::given(http_method("POST"))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
-            .expect(1) // exactly one call proves we did not retry a fail-fast error
+            .expect(1) // one call proves we did not retry a fail-fast error
             .mount(&server)
             .await;
 
         let client = RpcClient::new(server.uri());
-        let out: Result<String> = client.request("eth_call", ()).await;
+        let out: Result<String> = client.unwrap().request("eth_call", ()).await;
         assert!(matches!(out, Err(RpcError::RpcResponse { .. })));
     }
 
-    // 429 + Retry-After: 1 means the wait is floored to at least 1s, then succeeds.
+    // a 429 with retry-after of 1 floors the wait to at least 1s, then succeeds
     #[tokio::test]
     async fn rate_limited_retry_after_is_floored() {
         let server = MockServer::start().await;
@@ -214,7 +214,7 @@ mod tests {
 
         let client = RpcClient::new(server.uri());
         let start = Instant::now();
-        let out: Result<String> = client.request("eth_blockNumber", ()).await;
+        let out: Result<String> = client.unwrap().request("eth_blockNumber", ()).await;
         assert_eq!(out.unwrap(), "0x10");
         assert!(
             start.elapsed() >= Duration::from_secs(1),
@@ -223,7 +223,7 @@ mod tests {
         );
     }
 
-    // concurrency cap: in-flight requests at the server never exceed the permit count (10).
+    // concurrency cap: in-flight requests at the server never exceed the permit count (10)
     struct CountingResponder {
         in_flight: Arc<AtomicUsize>,
         max: Arc<AtomicUsize>,
@@ -258,7 +258,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = Arc::new(RpcClient::new(server.uri()));
+        let client = Arc::new(RpcClient::new(server.uri()).unwrap());
         let mut handles = Vec::new();
         for _ in 0..25 {
             let c = client.clone();

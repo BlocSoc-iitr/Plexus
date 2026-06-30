@@ -8,8 +8,8 @@ use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
 use reqwest::{header::HeaderMap, Client, StatusCode, Url};
 use tower::Service;
 
-/// Carried inside the transport error on a 429, so the Retry-After value rides
-/// back with this request — no shared side channel, no aliasing.
+/// carried inside the transport error on a 429 so the retry-after value rides
+/// back with this request, with no shared side channel and no aliasing
 #[derive(Debug)]
 pub struct RateLimited {
     pub retry_after: Option<Duration>,
@@ -22,7 +22,7 @@ impl fmt::Display for RateLimited {
 }
 impl std::error::Error for RateLimited {}
 
-/// Parse the <delay-seconds> form of Retry-After.
+/// parse the delay-seconds form of retry-after
 fn parse_retry_after(h: &HeaderMap) -> Option<Duration> {
     h.get("retry-after")?
         .to_str()
@@ -67,7 +67,7 @@ impl Service<RequestPacket> for RetryAfterTransport {
                 .send()
                 .await
                 .map_err(TransportErrorKind::custom)?;
-            // On a 429, snapshot Retry-After and carry it back *in the error*.
+            // on a 429, snapshot retry-after and carry it back in the error
             if resp.status() == StatusCode::TOO_MANY_REQUESTS {
                 let retry_after = parse_retry_after(resp.headers());
                 return Err(TransportErrorKind::custom(RateLimited { retry_after }));
@@ -124,21 +124,21 @@ mod tests {
 
     #[test]
     fn retry_after_http_date_is_unsupported_none() {
-        // The HTTP-date form is intentionally not parsed.
+        // the http-date form is intentionally not parsed
         assert_eq!(
             parse_retry_after(&header_map("Wed, 21 Oct 2015 07:28:00 GMT")),
             None
         );
     }
 
-    //Service::call against a mock endpoint
+    // Service::call against a mock endpoint
 
     fn packet() -> RequestPacket {
         let req = Request::new("eth_blockNumber", Id::Number(0), ());
         RequestPacket::Single(req.serialize().unwrap())
     }
 
-    // Recover the RateLimited that rides inside a 429's transport error
+    // recover the RateLimited that rides inside a 429's transport error
     fn as_rate_limited(err: &TransportError) -> Option<&RateLimited> {
         match err {
             AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => {
@@ -148,7 +148,7 @@ mod tests {
         }
     }
 
-    // A 200 with a well-formed body deserializes into a single response
+    // a 200 with a well-formed body deserializes into a single response
     #[tokio::test]
     async fn call_200_deserializes_response() {
         let server = MockServer::start().await;
@@ -163,7 +163,7 @@ mod tests {
         assert!(matches!(resp, ResponsePacket::Single(_)));
     }
 
-    // A 429 carries the parsed Retry-After back inside the error
+    // a 429 carries the parsed retry-after back inside the error
     #[tokio::test]
     async fn call_429_carries_retry_after() {
         let server = MockServer::start().await;
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(rl.retry_after, Some(Duration::from_secs(7)));
     }
 
-    // A 429 without the header still signals RateLimited, floor unknown
+    // a 429 without the header still signals RateLimited, floor unknown
     #[tokio::test]
     async fn call_429_without_header_is_none() {
         let server = MockServer::start().await;
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(rl.retry_after, None);
     }
 
-    // A non-json body fails deserialization (and is not mistaken for a 429)
+    // a non-json body fails deserialization and is not mistaken for a 429
     #[tokio::test]
     async fn call_malformed_body_errors() {
         let server = MockServer::start().await;
@@ -207,7 +207,7 @@ mod tests {
         assert!(as_rate_limited(&err).is_none());
     }
 
-    // A dead endpoint surfaces a transport error rather than panicking
+    // a dead endpoint surfaces a transport error rather than panicking
     #[tokio::test]
     async fn call_connection_refused_is_error() {
         let mut t = RetryAfterTransport::new("http://127.0.0.1:1".parse().unwrap());

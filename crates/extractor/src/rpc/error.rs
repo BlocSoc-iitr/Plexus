@@ -45,15 +45,18 @@ pub enum RpcError {
         #[source]
         source: TransportError,
     },
+
+    #[error("Invalid RPC url {url}: {method}")]
+    InvalidUrl { url: String, method: String },
 }
 
-// generic over the Ok type T, error fixed to RpcError
+// generic over the ok type T, error fixed to RpcError
 pub type Result<T> = std::result::Result<T, RpcError>;
 
-/// Maps an alloy transport error (+ captured 429 headers) into a typed
-/// RpcError and a retryable verdict.
+/// maps an alloy transport error and captured 429 headers into a typed
+/// RpcError and a retryable verdict
 pub fn classify(err: TransportError, method: &str) -> (RpcError, RetryFlag) {
-    // JSON-RPC error reply fail fast
+    // json-rpc error reply, fail fast
     if err.is_error_resp() {
         return (
             RpcError::RpcResponse {
@@ -95,9 +98,9 @@ mod tests {
     use super::*;
     use alloy::rpc::json_rpc::ErrorPayload;
 
-    // Ordered to mirror classify's own branch order: error-resp, then 429, then plain transport.
+    // ordered to mirror classify's own branch order: error-resp, then 429, then plain transport
 
-    // A JSON-RPC error reply is non-retryable and maps to RpcResponse.
+    // a json-rpc error reply is non-retryable and maps to RpcResponse
     #[test]
     fn classify_error_response_fails_fast() {
         let payload = serde_json::from_str::<ErrorPayload>(
@@ -109,7 +112,7 @@ mod tests {
         assert!(matches!(err, RpcError::RpcResponse { .. }));
     }
 
-    // A 429 carried as a custom RateLimited error is retryable and keeps retry_after.
+    // a 429 carried as a custom RateLimited error is retryable and keeps retry_after
     #[test]
     fn classify_rate_limited_is_retryable_and_preserves_retry_after() {
         let raw = TransportErrorKind::custom(RateLimited {
@@ -129,7 +132,7 @@ mod tests {
         }
     }
 
-    // A 429 with no/unparseable Retry-After still classifies as RateLimited (retry_after None).
+    // a 429 with no or unparseable retry-after still classifies as RateLimited (retry_after none)
     #[test]
     fn classify_rate_limited_without_retry_after() {
         let raw = TransportErrorKind::custom(RateLimited { retry_after: None });
@@ -141,7 +144,7 @@ mod tests {
         }
     }
 
-    // Any other transport-layer failure is retryable and maps to Transport.
+    // any other transport-layer failure is retryable and maps to Transport
     #[test]
     fn classify_plain_transport_is_retryable() {
         let (err, flag) = classify(
