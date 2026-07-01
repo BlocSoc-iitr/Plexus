@@ -8,15 +8,18 @@ pub struct CacheConfig {
     pub root: PathBuf,
 }
 
-impl CacheConfig {
+impl Default for CacheConfig {
     //default root of dirs::home_dir()/.plexus/cache
-    pub fn default() -> Self {
+    fn default() -> Self {
         let root: PathBuf = dirs::home_dir()
             .expect("cannot resolve home directory; set HOME or use CacheConfig::with_root()")
             .join(".plexus")
             .join("cache");
         Self { root }
     }
+}
+
+impl CacheConfig {
     //custom root path
     pub fn with_root(root: PathBuf) -> Self {
         Self { root }
