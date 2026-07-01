@@ -196,9 +196,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::transport::{RateLimited, ServiceUnavailable};
+    use crate::rpc::transport::RetryAfterParseHeader;
     use alloy::rpc::json_rpc::ErrorPayload;
     use alloy::transports::TransportErrorKind;
+use reqwest::StatusCode;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -219,12 +220,20 @@ mod tests {
         TransportError::ErrorResp(payload)
     }
 
+    fn retry_after_parse_header(status: StatusCode, retry_after: Option<Duration>) -> TransportError {
+        TransportErrorKind::custom( RetryAfterParseHeader{
+            status,
+            retry_after
+        })
+    }
+
+    // the merged marker split back into the two cases the tests reach for
     fn rate_limited(retry_after: Option<Duration>) -> TransportError {
-        TransportErrorKind::custom(RateLimited { retry_after })
+        retry_after_parse_header(StatusCode::TOO_MANY_REQUESTS, retry_after)
     }
 
     fn service_unavailable(retry_after: Option<Duration>) -> TransportError {
-        TransportErrorKind::custom(ServiceUnavailable { retry_after })
+        retry_after_parse_header(StatusCode::SERVICE_UNAVAILABLE, retry_after)
     }
 
     // a roomy semaphore so these single-flight retry tests never block on permits;

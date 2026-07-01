@@ -4,35 +4,24 @@ use std::time::Duration;
 
 use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
 use alloy::transports::{TransportError, TransportErrorKind, TransportFut};
+use reqwest::StatusCode;
 use reqwest::{header::HeaderMap, Client, Url};
 use tower::Service;
 
 // rides inside the transport error on a 429 so the retry-after value comes back
 // with the request instead of through a shared side channel
 #[derive(Debug)]
-pub struct RateLimited {
+pub struct RetryAfterParseHeader {
+    pub status: StatusCode,
     pub retry_after: Option<Duration>,
 }
 
-// same idea for a 503, carries its retry-after back to the retry layer
-#[derive(Debug)]
-pub struct ServiceUnavailable {
-    pub retry_after: Option<Duration>,
-}
-
-impl fmt::Display for RateLimited {
+impl fmt::Display for RetryAfterParseHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "rate limited (HTTP 429)")
+        write!(f, "error code:- (HTTP {})", self.status)
     }
 }
-impl std::error::Error for RateLimited {}
-
-impl fmt::Display for ServiceUnavailable {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "rate limited (HTTP 429)")
-    }
-}
-impl std::error::Error for ServiceUnavailable {}
+impl std::error::Error for RetryAfterParseHeader {}
 
 // only the delay-seconds form of retry-after, the http-date form is ignored
 fn parse_retry_after(h: &HeaderMap) -> Option<Duration> {
@@ -79,22 +68,18 @@ impl Service<RequestPacket> for RetryAfterTransport {
                 .send()
                 .await
                 .map_err(TransportErrorKind::custom)?;
-            // on a 429, grab retry-after and send it back in the error
-            if resp.status() == 429 {
+            // on a 429 or 503, grab retry-after and send it back in the error
+            let status = resp.status();
+            if status == 429 || status == 503 {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err(TransportErrorKind::custom(RateLimited { retry_after }));
-            }
-            // same for a 503
-            if resp.status() == 503 {
-                let retry_after = parse_retry_after(resp.headers());
-                return Err(TransportErrorKind::custom(ServiceUnavailable {
-                    retry_after,
+                return Err(TransportErrorKind::custom(RetryAfterParseHeader { 
+                    status,
+                    retry_after 
                 }));
             }
             // anything else non-2xx (5xx, 401, 404, and so on) is a transport failure,
             // not a json-rpc reply. turn it into a typed http error so an error page
             // never reaches the json parser and gets misreported as a decode failure
-            let status = resp.status();
             if !status.is_success() {
                 // there's no retry-after to carry here, classify in error.rs sorts
                 // these out by their status code
@@ -171,10 +156,10 @@ mod tests {
     }
 
     // pull the rate-limited marker back out of a 429's transport error
-    fn as_rate_limited(err: &TransportError) -> Option<&RateLimited> {
+    fn as_rate_limited(err: &TransportError) -> Option<&RetryAfterParseHeader> {
         match err {
             AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => {
-                e.downcast_ref::<RateLimited>()
+                e.downcast_ref::<RetryAfterParseHeader>()
             }
             _ => None,
         }
@@ -267,10 +252,10 @@ mod tests {
     }
 
     // pull the service-unavailable marker back out of a 503's transport error
-    fn as_service_unavailable(err: &TransportError) -> Option<&ServiceUnavailable> {
+    fn as_service_unavailable(err: &TransportError) -> Option<&RetryAfterParseHeader> {
         match err {
             AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => {
-                e.downcast_ref::<ServiceUnavailable>()
+                e.downcast_ref::<RetryAfterParseHeader>()
             }
             _ => None,
         }

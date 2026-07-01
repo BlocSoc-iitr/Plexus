@@ -1,4 +1,4 @@
-use crate::rpc::transport::{RateLimited, ServiceUnavailable};
+use crate::rpc::transport::RetryAfterParseHeader;
 use alloy::transports::{RpcError as AlloyRpcError, TransportError, TransportErrorKind};
 use std::time::Duration;
 use thiserror::Error;
@@ -119,8 +119,8 @@ pub fn classify(err: TransportError, method: &str) -> (RpcError, RetryFlag) {
             RetryFlag::Fail,
         );
     }
-    // our custom 429 marker carries the floor
-    if let Some(rl) = as_rate_limited(&err) {
+    // our custom 429 or 503 marker carries the floor
+    if let Some(rl) = as_retry_after_parse_header(&err) {
         // if the wait is longer than two minutes, give up rather than hold the task
         let retry_after = rl.retry_after;
         if retry_after.unwrap_or(Duration::ZERO) > Duration::from_mins(2) {
@@ -132,29 +132,17 @@ pub fn classify(err: TransportError, method: &str) -> (RpcError, RetryFlag) {
                 RetryFlag::Fail,
             );
         }
-        return (
-            RpcError::RateLimited {
-                method,
-                retry_after,
-            },
-            RetryFlag::Retry,
-        );
-    }
-    // same handling for our 503 marker
-    if let Some(rl) = as_service_unavailable(&err) {
-        let retry_after = rl.retry_after;
-        // same two-minute ceiling as the 429 path above
-        if retry_after.unwrap_or(Duration::ZERO) > Duration::from_mins(2) {
+        if rl.status == 503 {
             return (
-                RpcError::RetryDelayTooLong {
+                RpcError::ServiceUnavailable { 
                     method,
-                    retry_after,
+                    retry_after 
                 },
-                RetryFlag::Fail,
-            );
+                RetryFlag::Retry
+            )
         }
         return (
-            RpcError::ServiceUnavailable {
+            RpcError::RateLimited {
                 method,
                 retry_after,
             },
@@ -235,18 +223,9 @@ fn as_http_status(err: &TransportError) -> Option<u16> {
     }
 }
 
-fn as_rate_limited(err: &TransportError) -> Option<&RateLimited> {
+fn as_retry_after_parse_header(err: &TransportError) -> Option<&RetryAfterParseHeader> {
     match err {
-        AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => e.downcast_ref::<RateLimited>(),
-        _ => None,
-    }
-}
-
-fn as_service_unavailable(err: &TransportError) -> Option<&ServiceUnavailable> {
-    match err {
-        AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => {
-            e.downcast_ref::<ServiceUnavailable>()
-        }
+        AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => e.downcast_ref::<RetryAfterParseHeader>(),
         _ => None,
     }
 }
@@ -255,6 +234,7 @@ fn as_service_unavailable(err: &TransportError) -> Option<&ServiceUnavailable> {
 mod tests {
     use super::*;
     use alloy::rpc::json_rpc::ErrorPayload;
+    use reqwest::StatusCode;
 
     // ordered to mirror classify's branch order: error-resp, then 429, then the rest
 
@@ -273,7 +253,8 @@ mod tests {
     // a 429 marker is retryable and keeps its retry-after
     #[test]
     fn classify_rate_limited_is_retryable_and_preserves_retry_after() {
-        let raw = TransportErrorKind::custom(RateLimited {
+        let raw = TransportErrorKind::custom(RetryAfterParseHeader {
+            status: StatusCode::TOO_MANY_REQUESTS,
             retry_after: Some(Duration::from_secs(2)),
         });
         let (err, flag) = classify(raw, "eth_getLogs");
@@ -293,7 +274,10 @@ mod tests {
     // a 429 with no parseable retry-after still retries, just without a floor
     #[test]
     fn classify_rate_limited_without_retry_after() {
-        let raw = TransportErrorKind::custom(RateLimited { retry_after: None });
+        let raw = TransportErrorKind::custom(RetryAfterParseHeader {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            retry_after: None,
+        });
         let (err, flag) = classify(raw, "eth_call");
         assert_eq!(flag, RetryFlag::Retry);
         match err {
@@ -316,7 +300,8 @@ mod tests {
     // a 503 marker stays retryable and keeps its retry-after floor
     #[test]
     fn classify_service_unavailable_retries_and_preserves_retry_after() {
-        let raw = TransportErrorKind::custom(ServiceUnavailable {
+        let raw = TransportErrorKind::custom(RetryAfterParseHeader {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             retry_after: Some(Duration::from_secs(5)),
         });
         let (err, flag) = classify(raw, "eth_call");
@@ -332,7 +317,8 @@ mod tests {
     // a retry-after past the two-minute cap fails fast instead of waiting (429 path)
     #[test]
     fn classify_rate_limited_over_cap_fails_fast() {
-        let raw = TransportErrorKind::custom(RateLimited {
+        let raw = TransportErrorKind::custom(RetryAfterParseHeader {
+            status: StatusCode::TOO_MANY_REQUESTS,
             retry_after: Some(Duration::from_secs(3 * 60)),
         });
         let (err, flag) = classify(raw, "eth_call");
@@ -343,7 +329,8 @@ mod tests {
     // the same cap guards the 503 path (separate branch, so tested separately)
     #[test]
     fn classify_service_unavailable_over_cap_fails_fast() {
-        let raw = TransportErrorKind::custom(ServiceUnavailable {
+        let raw = TransportErrorKind::custom(RetryAfterParseHeader {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             retry_after: Some(Duration::from_secs(3 * 60)),
         });
         let (err, flag) = classify(raw, "eth_call");
