@@ -134,12 +134,12 @@ pub fn classify(err: TransportError, method: &str) -> (RpcError, RetryFlag) {
         }
         if rl.status == 503 {
             return (
-                RpcError::ServiceUnavailable { 
+                RpcError::ServiceUnavailable {
                     method,
-                    retry_after 
+                    retry_after,
                 },
-                RetryFlag::Retry
-            )
+                RetryFlag::Retry,
+            );
         }
         return (
             RpcError::RateLimited {
@@ -225,7 +225,9 @@ fn as_http_status(err: &TransportError) -> Option<u16> {
 
 fn as_retry_after_parse_header(err: &TransportError) -> Option<&RetryAfterParseHeader> {
     match err {
-        AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => e.downcast_ref::<RetryAfterParseHeader>(),
+        AlloyRpcError::Transport(TransportErrorKind::Custom(e)) => {
+            e.downcast_ref::<RetryAfterParseHeader>()
+        }
         _ => None,
     }
 }

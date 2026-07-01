@@ -72,9 +72,9 @@ impl Service<RequestPacket> for RetryAfterTransport {
             let status = resp.status();
             if status == 429 || status == 503 {
                 let retry_after = parse_retry_after(resp.headers());
-                return Err(TransportErrorKind::custom(RetryAfterParseHeader { 
+                return Err(TransportErrorKind::custom(RetryAfterParseHeader {
                     status,
-                    retry_after 
+                    retry_after,
                 }));
             }
             // anything else non-2xx (5xx, 401, 404, and so on) is a transport failure,

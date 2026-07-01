@@ -199,7 +199,7 @@ mod tests {
     use crate::rpc::transport::RetryAfterParseHeader;
     use alloy::rpc::json_rpc::ErrorPayload;
     use alloy::transports::TransportErrorKind;
-use reqwest::StatusCode;
+    use reqwest::StatusCode;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -220,10 +220,13 @@ use reqwest::StatusCode;
         TransportError::ErrorResp(payload)
     }
 
-    fn retry_after_parse_header(status: StatusCode, retry_after: Option<Duration>) -> TransportError {
-        TransportErrorKind::custom( RetryAfterParseHeader{
+    fn retry_after_parse_header(
+        status: StatusCode,
+        retry_after: Option<Duration>,
+    ) -> TransportError {
+        TransportErrorKind::custom(RetryAfterParseHeader {
             status,
-            retry_after
+            retry_after,
         })
     }
 
