@@ -1,0 +1,49 @@
+# Plexus BAL devnet — a local two-client Glamsterdam network that produces real
+# EIP-7928 block access lists, for the end-to-end tests in #31.
+#
+# Trimmed from the four-client config in #17 down to the two clients Plexus can
+# actually read a BAL from (see #26 for why):
+#
+#   reth        eth_getBlockAccessList        flat JSON, all fields present
+#   nethermind  debug_getRawBlockAccessList   raw RLP hex, no JSON getter
+#
+# geth is omitted because it commits a BAL in the header but exposes no working
+# RPC getter at all; erigon because it computes a different genesis hash and so
+# never peers; besu because it is a backlog item, not part of #26. #17 has the
+# full compatibility matrix.
+#
+# The image tags below were the newest glamsterdam-devnet-8 builds on
+# 2026-08-21. They go stale within weeks — run ./refresh-tags.sh and paste in
+# what it prints rather than trusting this file. See README.md.
+
+participants:
+  - el_type: reth
+    el_image: ethpandaops/reth:glamsterdam-devnet-8-3d270d9
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8-cec56ae
+
+  - el_type: nethermind
+    el_image: ethpandaops/nethermind:glamsterdam-devnet-8-1aa158a
+    cl_type: lighthouse
+    cl_image: ethpandaops/lighthouse:glamsterdam-devnet-8-cec56ae
+
+  # Neither participant needs el_extra_params: reth serves the eth_ getter and
+  # nethermind the debug_ one under the package's own defaults. If you add a
+  # participant that does need one, note that el_extra_params REPLACES a
+  # client's API list instead of extending it. Leave `admin` out of a custom
+  # --http.api and Kurtosis's own orchestration hangs forever, because it calls
+  # admin_nodeInfo internally to wire up peering (#17). Always keep admin
+  # alongside whatever eth/debug namespaces you are adding.
+
+network_params:
+  network_id: "12345"
+
+  # REQUIRED, and the single biggest blocker in #17. The ethereum-package
+  # defaults gloas_fork_epoch (Gloas is Glamsterdam's CL codename) to a "never"
+  # sentinel, so BAL stays inert even on fully BAL-capable builds: the nodes
+  # look perfectly healthy and every block comes back with
+  # blockAccessListHash: null. Setting it to 0 makes BAL live from genesis.
+  gloas_fork_epoch: 0
+
+additional_services:
+  - dora
