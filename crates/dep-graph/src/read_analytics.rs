@@ -137,15 +137,20 @@ fn key_address(key: &StateKey) -> alloy_primitives::Address {
     }
 }
 
-fn storage_address_slot(key: &StateKey) -> Option<(alloy_primitives::Address, alloy_primitives::B256)> {
+fn storage_address_slot(
+    key: &StateKey,
+) -> Option<(alloy_primitives::Address, alloy_primitives::B256)> {
     match key {
         StateKey::StorageSlot { address, slot } => Some((*address, *slot)),
         _ => None,
     }
 }
 
-fn read_counts(block: &BlockAccess) -> HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> {
-    let mut counts: HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> = HashMap::new();
+fn read_counts(
+    block: &BlockAccess,
+) -> HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> {
+    let mut counts: HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> =
+        HashMap::new();
     for key in block.reads() {
         if let Some((addr, slot)) = storage_address_slot(key) {
             *counts.entry((addr, slot)).or_insert(0) += 1;
@@ -154,8 +159,11 @@ fn read_counts(block: &BlockAccess) -> HashMap<(alloy_primitives::Address, alloy
     counts
 }
 
-fn write_counts(block: &BlockAccess) -> HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> {
-    let mut counts: HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> = HashMap::new();
+fn write_counts(
+    block: &BlockAccess,
+) -> HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> {
+    let mut counts: HashMap<(alloy_primitives::Address, alloy_primitives::B256), usize> =
+        HashMap::new();
     for entry in &block.writes {
         if let Some((addr, slot)) = storage_address_slot(&entry.key) {
             *counts.entry((addr, slot)).or_insert(0) += 1;
@@ -164,9 +172,7 @@ fn write_counts(block: &BlockAccess) -> HashMap<(alloy_primitives::Address, allo
     counts
 }
 
-fn per_address_counts(
-    block: &BlockAccess,
-) -> HashMap<alloy_primitives::Address, (usize, usize)> {
+fn per_address_counts(block: &BlockAccess) -> HashMap<alloy_primitives::Address, (usize, usize)> {
     let mut map: HashMap<alloy_primitives::Address, (usize, usize)> = HashMap::new();
     for key in block.reads() {
         let entry = map.entry(key_address(key)).or_insert((0, 0));
@@ -184,12 +190,10 @@ fn write_addresses(block: &BlockAccess) -> HashSet<alloy_primitives::Address> {
 }
 
 fn read_addresses(block: &BlockAccess) -> HashSet<alloy_primitives::Address> {
-    block.reads().iter().map(|k| key_address(k)).collect()
+    block.reads().iter().map(key_address).collect()
 }
 
-fn tx_writes_with_position(
-    block: &BlockAccess,
-) -> Vec<(&WriteEntry, usize)> {
+fn tx_writes_with_position(block: &BlockAccess) -> Vec<(&WriteEntry, usize)> {
     block
         .writes
         .iter()
@@ -210,7 +214,7 @@ fn compute_hot_read_slots(block: &BlockAccess) -> HotReadSlots {
             read_count,
         })
         .collect();
-    slots.sort_by(|a, b| b.read_count.cmp(&a.read_count));
+    slots.sort_by_key(|b| std::cmp::Reverse(b.read_count));
 
     HotReadSlots {
         slots,
@@ -237,7 +241,7 @@ fn compute_read_write_ratio(block: &BlockAccess) -> ReadWriteRatio {
             }
         })
         .collect();
-    contracts.sort_by(|a, b| b.read_count.cmp(&a.read_count));
+    contracts.sort_by_key(|b| std::cmp::Reverse(b.read_count));
 
     ReadWriteRatio {
         contracts,
@@ -271,7 +275,7 @@ fn compute_cache_candidacy(block: &BlockAccess) -> CacheCandidacy {
             }
         })
         .collect();
-    candidates.sort_by(|a, b| b.read_count.cmp(&a.read_count));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.read_count));
 
     CacheCandidacy {
         candidates,
@@ -300,9 +304,7 @@ fn compute_contention_hotspots(block: &BlockAccess) -> ContentionHotspots {
             }
         })
         .collect();
-    hotspots.sort_by(|a, b| {
-        (b.read_count + b.write_count).cmp(&(a.read_count + a.write_count))
-    });
+    hotspots.sort_by_key(|b| std::cmp::Reverse(b.read_count + b.write_count));
 
     ContentionHotspots {
         hotspots,
@@ -328,10 +330,7 @@ fn compute_mev_sandwich_signals(block: &BlockAccess) -> MevSandwichSignals {
                 if let Some((address, slot)) = storage_address_slot(&w.key) {
                     let write_count_to_slot = tx_writes
                         .iter()
-                        .filter(|(tw, _)| {
-                            storage_address_slot(&tw.key)
-                                == Some((address, slot))
-                        })
+                        .filter(|(tw, _)| storage_address_slot(&tw.key) == Some((address, slot)))
                         .count();
                     let may_be_noop_write = write_count_to_slot <= 1;
                     return Some(MevSandwichSignal {
@@ -371,7 +370,7 @@ fn compute_touched_unchanged(block: &BlockAccess) -> TouchedUnchangedAccounts {
             }
         })
         .collect();
-    accounts.sort_by(|a, b| a.address.cmp(&b.address));
+    accounts.sort_by_key(|a| a.address);
 
     TouchedUnchangedAccounts {
         accounts,
@@ -558,7 +557,10 @@ mod tests {
         assert!(addrs.contains(&addr(0xB0)));
         assert!(addrs.contains(&addr(0xC0)));
 
-        assert_eq!(hot.caveats.block_granularity, Caveats::default().block_granularity);
+        assert_eq!(
+            hot.caveats.block_granularity,
+            Caveats::default().block_granularity
+        );
     }
 
     #[test]
@@ -594,11 +596,7 @@ mod tests {
         let cc = compute_cache_candidacy(&block);
 
         assert_eq!(cc.candidates.len(), 5);
-        let candidate_set: HashSet<_> = cc
-            .candidates
-            .iter()
-            .map(|c| (c.address, c.slot))
-            .collect();
+        let candidate_set: HashSet<_> = cc.candidates.iter().map(|c| (c.address, c.slot)).collect();
         assert!(candidate_set.contains(&(addr(0xA0), slot(0x02))));
         assert!(candidate_set.contains(&(addr(0xA0), slot(0x03))));
         assert!(candidate_set.contains(&(addr(0xB0), slot(0x01))));
@@ -681,11 +679,7 @@ mod tests {
         let ch = compute_contention_hotspots(&block);
 
         assert_eq!(ch.hotspots.len(), 3);
-        let set: HashSet<_> = ch
-            .hotspots
-            .iter()
-            .map(|h| (h.address, h.slot))
-            .collect();
+        let set: HashSet<_> = ch.hotspots.iter().map(|h| (h.address, h.slot)).collect();
         assert!(set.contains(&(addr(0xE0), slot(0x01))));
         assert!(set.contains(&(addr(0xF0), slot(0x01))));
         assert!(set.contains(&(addr(0xF0), slot(0x02))));
@@ -809,14 +803,42 @@ mod tests {
         let block = fixture_amm_block();
         let analytics = compute_read_analytics(&block);
 
-        assert!(!analytics.hot_read_slots.caveats.block_granularity.is_empty());
+        assert!(!analytics
+            .hot_read_slots
+            .caveats
+            .block_granularity
+            .is_empty());
         assert!(!analytics.hot_read_slots.caveats.contamination.is_empty());
-        assert!(!analytics.read_write_ratio.caveats.block_granularity.is_empty());
-        assert!(!analytics.cache_candidacy.caveats.block_granularity.is_empty());
-        assert!(!analytics.contention_hotspots.caveats.block_granularity.is_empty());
-        assert!(!analytics.prefetch_working_set.caveats.block_granularity.is_empty());
-        assert!(!analytics.mev_sandwich_signals.caveats.block_granularity.is_empty());
-        assert!(!analytics.touched_unchanged.caveats.block_granularity.is_empty());
+        assert!(!analytics
+            .read_write_ratio
+            .caveats
+            .block_granularity
+            .is_empty());
+        assert!(!analytics
+            .cache_candidacy
+            .caveats
+            .block_granularity
+            .is_empty());
+        assert!(!analytics
+            .contention_hotspots
+            .caveats
+            .block_granularity
+            .is_empty());
+        assert!(!analytics
+            .prefetch_working_set
+            .caveats
+            .block_granularity
+            .is_empty());
+        assert!(!analytics
+            .mev_sandwich_signals
+            .caveats
+            .block_granularity
+            .is_empty());
+        assert!(!analytics
+            .touched_unchanged
+            .caveats
+            .block_granularity
+            .is_empty());
     }
 
     #[test]
