@@ -6,4 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-
+petgraph = "0.6"
+types = { path = "../types" }
+thiserror.workspace = true
+alloy-primitives.workspace = true
