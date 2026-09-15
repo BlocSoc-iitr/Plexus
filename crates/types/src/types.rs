@@ -21,6 +21,17 @@ pub enum StateKey {
     Code(Address),
 }
 
+impl StateKey {
+    pub fn address(&self) -> Address {
+        match self {
+            StateKey::StorageSlot { address, .. } => *address,
+            StateKey::Balance(address) | StateKey::Nonce(address) | StateKey::Code(address) => {
+                *address
+            }
+        }
+    }
+}
+
 // ─── Read Attribution ─────────────────────────────────────────────────────────
 
 // Whether a transaction's read set is exactly attributed or only block-level.
@@ -451,5 +462,23 @@ mod tests {
     fn empty_block_access_is_empty() {
         assert!(BlockAccess::new(ctx(), Vec::new(), HashSet::new(), HashSet::new()).is_empty());
         assert!(!sample_block().is_empty());
+    }
+
+    #[test]
+    fn state_key_address_returns_address_for_every_variant() {
+        let address = addr(0x11);
+
+        assert_eq!(
+            StateKey::StorageSlot {
+                address,
+                slot: slot(0x01),
+            }
+            .address(),
+            address
+        );
+
+        assert_eq!(StateKey::Balance(address).address(), address);
+        assert_eq!(StateKey::Code(address).address(), address);
+        assert_eq!(StateKey::Nonce(address).address(), address);
     }
 }
