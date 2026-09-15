@@ -2,7 +2,8 @@
 //! task-group (weakly connected component) statistics.
 
 use crate::graph::DepGraph;
-use petgraph::algo::connected_components;
+use petgraph::algo::{connected_components, toposort};
+use petgraph::Direction;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -13,6 +14,10 @@ pub struct BlockMetrics {
     pub task_group_count: usize,
     pub largest_group_size: usize,
     pub singleton_group_count: usize,
+    pub critical_path_length: usize,
+    pub max_achievable_parallelism: usize,
+    pub parallel_speedup_factor: f64,
+    pub dependency_graph_density: f64,
 }
 
 pub fn independence_coefficient(graph: &DepGraph) -> f64 {
@@ -48,6 +53,23 @@ pub fn compute_metrics(graph: &DepGraph) -> BlockMetrics {
     let group_sizes = weakly_connected_component_sizes(graph);
     let largest_group_size = group_sizes.iter().copied().max().unwrap_or(0);
     let singleton_group_count = group_sizes.iter().filter(|&&size| size == 1).count();
+    let (cpl, map) = compute_topo_levels(graph);
+
+    let parallel_speedup_factor = if cpl == 0 {
+        1.0
+    } else {
+        tx_count as f64 / cpl as f64
+    };
+
+    let dependency_graph_density = {
+        let n = tx_count;
+        if n < 2 {
+            0.0
+        } else {
+            let max_edges = n * (n - 1) / 2;
+            graph.edge_count() as f64 / max_edges as f64
+        }
+    };
 
     BlockMetrics {
         tx_count,
@@ -56,6 +78,10 @@ pub fn compute_metrics(graph: &DepGraph) -> BlockMetrics {
         task_group_count,
         largest_group_size,
         singleton_group_count,
+        critical_path_length: cpl,
+        max_achievable_parallelism: map,
+        parallel_speedup_factor,
+        dependency_graph_density,
     }
 }
 
@@ -98,6 +124,100 @@ fn weakly_connected_component_sizes(graph: &DepGraph) -> Vec<usize> {
     }
 
     sizes
+}
+/// Compute the longest dependency chain via single-pass topological DP.
+///
+/// Assigns every node a `level`:
+///
+/// level[root] = 1
+/// level[node] = max(level[predecessors]) + 1
+///
+/// Returns the maximum level, i.e. the critical path length.
+/// Returns `0` for an empty graph.
+pub fn critical_path_length(graph: &DepGraph) -> usize {
+    if graph.tx_count == 0 {
+        return 0;
+    }
+
+    let topo = toposort(&graph.graph, None).expect("Dependency graph must ");
+
+    let mut level = vec![0usize; graph.graph.node_count()];
+
+    for node in &topo {
+        let pred_max = graph
+            .graph
+            .neighbors_directed(*node, Direction::Incoming)
+            .map(|pred| level[pred.index()])
+            .max()
+            .unwrap_or(0);
+        level[node.index()] = pred_max + 1;
+    }
+
+    level.into_iter().max().unwrap_or(0)
+}
+
+/// Calculates peak wave width across all execution levels.
+///
+/// Uses [`compute_topo_levels`] to group transactions into concurrent execution waves
+/// and returns the size of the largest wave.
+pub fn max_achievable_parallelism(graph: &DepGraph) -> usize {
+    compute_topo_levels(graph).1
+}
+
+/// Theoretical transaction-count speedup: `tx_count / critical_path_length`.
+///
+/// Guards: returns `1.0` when `critical_path_length == 0` (empty block).
+pub fn parallel_speedup_factor(graph: &DepGraph) -> f64 {
+    let cpl = compute_topo_levels(graph).0;
+    if cpl == 0 {
+        return 1.0;
+    }
+    graph.tx_count as f64 / cpl as f64
+}
+
+/// Fraction of all possible conflict edges that actually exist.
+///
+/// `density = edge_count / (tx_count * (tx_count - 1) / 2)`
+///
+/// Guards: returns `0.0` when `tx_count < 2` (no pairs possible).
+pub fn dependency_graph_density(graph: &DepGraph) -> f64 {
+    let n = graph.tx_count;
+    if n < 2 {
+        return 0.0;
+    }
+    let max_edges = n * (n - 1) / 2;
+    graph.edge_count() as f64 / max_edges as f64
+}
+
+/// Single-pass topological DP helper returning `(critical_path_length, max_achievable_parallelism)`.
+fn compute_topo_levels(graph: &DepGraph) -> (usize, usize) {
+    if graph.tx_count == 0 {
+        return (0, 0);
+    }
+
+    let topo = toposort(&graph.graph, None).expect("dependency graph must be acyclic");
+    let mut level = vec![0usize; graph.graph.node_count()];
+
+    for node in &topo {
+        let pred_max = graph
+            .graph
+            .neighbors_directed(*node, Direction::Incoming)
+            .map(|pred| level[pred.index()])
+            .max()
+            .unwrap_or(0);
+        level[node.index()] = pred_max + 1;
+    }
+
+    let cpl = level.iter().copied().max().unwrap_or(0);
+
+    let mut wave_sizes = vec![0usize; cpl + 1];
+    for &l in &level {
+        wave_sizes[l] += 1;
+    }
+
+    let map = wave_sizes.into_iter().max().unwrap_or(0);
+
+    (cpl, map)
 }
 
 #[cfg(test)]
@@ -196,10 +316,17 @@ mod tests {
 
             let edge_attempts = next() % (tx_count as u64 * 2 + 1);
             for _ in 0..edge_attempts {
-                let a = (next() as usize) % tx_count;
-                let b = (next() as usize) % tx_count;
+                let mut a = (next() as usize) % tx_count;
+                let mut b = (next() as usize) % tx_count;
                 if a != b {
-                    add_edge(&mut g, a, b);
+                    if a > b {
+                        std::mem::swap(&mut a, &mut b);
+                    }
+                    let node_a = g.node_for_tx(a).unwrap();
+                    let node_b = g.node_for_tx(b).unwrap();
+                    if !g.graph.contains_edge(node_a, node_b) {
+                        add_edge(&mut g, a, b);
+                    }
                 }
             }
 
@@ -209,11 +336,67 @@ mod tests {
             assert!(m.task_group_count >= 1 && m.task_group_count <= tx_count);
             assert!(m.largest_group_size >= 1 && m.largest_group_size <= tx_count);
             assert!(m.independent_tx_count <= tx_count);
+            assert!(m.critical_path_length >= 1 && m.critical_path_length <= tx_count);
+            assert!((0.0..=1.0).contains(&m.dependency_graph_density));
+            assert!(m.critical_path_length * m.max_achievable_parallelism >= tx_count);
             // The BFS component count must agree with `connected_components`.
             assert_eq!(
                 m.task_group_count,
                 weakly_connected_component_sizes(&g).len()
             );
         }
+    }
+
+    #[test]
+    fn empty_block_new_metrics() {
+        let g = DepGraph::new(0, 1);
+        let m = compute_metrics(&g);
+        assert_eq!(m.critical_path_length, 0);
+        assert_eq!(m.max_achievable_parallelism, 0);
+        assert_eq!(m.parallel_speedup_factor, 1.0); // guard: cpl==0
+        assert_eq!(m.dependency_graph_density, 0.0); // guard: tx_count<2
+    }
+
+    #[test]
+    fn fully_parallel_block_new_metrics() {
+        let g = DepGraph::new(4, 1);
+        let m = compute_metrics(&g);
+        assert_eq!(m.critical_path_length, 1); // all at level 1
+        assert_eq!(m.max_achievable_parallelism, 4); // all 4 in wave 1
+        assert_eq!(m.parallel_speedup_factor, 4.0); // 4/1
+        assert_eq!(m.dependency_graph_density, 0.0); // no edges
+    }
+
+    #[test]
+    fn diamond_graph_new_metrics() {
+        let mut g = DepGraph::new(4, 1);
+        add_edge(&mut g, 0, 1);
+        add_edge(&mut g, 0, 2);
+        add_edge(&mut g, 1, 3);
+        add_edge(&mut g, 2, 3);
+        let m = compute_metrics(&g);
+        // levels: 0→1, 1→2, 2→2, 3→3  ⟹  cpl=3
+        assert_eq!(m.critical_path_length, 3);
+        // wave widths: {1:1, 2:2, 3:1}  ⟹  peak=2
+        assert_eq!(m.max_achievable_parallelism, 2);
+        // 4 / 3 ≈ 1.333…
+        assert!((m.parallel_speedup_factor - 4.0 / 3.0).abs() < 1e-10);
+        // edges=4, max_possible=6 → 4/6 ≈ 0.6667
+        assert!((m.dependency_graph_density - 4.0 / 6.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn linear_chain_new_metrics() {
+        // 0 -> 1 -> 2 -> 3
+        let mut g = DepGraph::new(4, 1);
+        for i in 0..3 {
+            add_edge(&mut g, i, i + 1);
+        }
+        let m = compute_metrics(&g);
+        assert_eq!(m.critical_path_length, 4);
+        assert_eq!(m.max_achievable_parallelism, 1);
+        assert_eq!(m.parallel_speedup_factor, 1.0); // 4/4 = 1.0
+                                                    // edges=3, max_possible=4*3/2=6 → 3/6 = 0.5
+        assert!((m.dependency_graph_density - 0.5).abs() < 1e-10);
     }
 }
